@@ -10,6 +10,7 @@ logging.basicConfig(
 )
 
 import os
+from keep_alive import keep_alive
 
 # Get the token from environment variables (Required for Render)
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
@@ -149,6 +150,9 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 if __name__ == '__main__':
+    # Start the dummy web server so Render doesn't crash the web service
+    keep_alive()
+    
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     
     # Set up the conversation handler
