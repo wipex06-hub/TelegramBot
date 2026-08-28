@@ -12,7 +12,7 @@ logging.basicConfig(
 import os
 
 # Get the token from environment variables (Required for Render)
-BOT_TOKEN = "8666028063:AAGG-NafYQ0VeMrh4Rdr7wYL3prdho1fEoc"
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("No BOT_TOKEN provided in environment variables")
 
@@ -153,7 +153,10 @@ if __name__ == '__main__':
     
     # Set up the conversation handler
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
+        entry_points=[
+            CommandHandler("start", start),
+            MessageHandler(filters.Regex('^(📱 Number Info|🪪 Aadhar Info)$'), choice_handler)
+        ],
         states={
             CHOOSING: [MessageHandler(filters.TEXT & ~filters.COMMAND, choice_handler)],
             WAITING_FOR_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_phone_input)],
