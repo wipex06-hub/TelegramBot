@@ -32,7 +32,9 @@ DATASET_URL_AADHAR = "hf://datasets/WipeX00/scrappeddata/idx_aadhar.*.parquet"
 DATASET_URL_TELEGRAM = "hf://datasets/WipeX00/Telegram-Dataset/data_*.parquet"
 
 # Initialize DuckDB and install httpfs extension for Hugging Face support
-con = duckdb.connect(':memory:')
+con = duckdb.connect('bot.duckdb')
+con.execute("PRAGMA memory_limit='256MB';")
+con.execute("PRAGMA threads=2;")
 con.execute("INSTALL httpfs;")
 con.execute("LOAD httpfs;")
 

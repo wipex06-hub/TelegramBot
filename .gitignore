@@ -9,3 +9,6 @@ venv/
 scratch_*.py
 check_schema.py
 *.json
+*.duckdb
+*.duckdb.tmp
+*.duckdb.wal
