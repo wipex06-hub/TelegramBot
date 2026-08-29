@@ -1,9 +1,10 @@
 import logging
 import duckdb
 import os
-import sqlite3
 import random
 import string
+import psycopg2
+from psycopg2.errors import DuplicateColumn
 from datetime import date
 from keep_alive import keep_alive
 from telegram import Update, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup
@@ -19,6 +20,8 @@ logging.basicConfig(
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("No BOT_TOKEN provided in environment variables")
+
+DATABASE_URL = os.environ.get("DATABASE_URL")
 
 # Admin ID for generating vouchers (Replace 0 with your actual Telegram ID if you want to hardcode it, or use Render env var)
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
@@ -37,12 +40,21 @@ CHOOSING, WAITING_FOR_PHONE, WAITING_FOR_DOC, WAITING_FOR_VOUCHER, WAITING_FOR_M
 
 # ================= Database & Credit System =================
 
+def get_db_connection():
+    if not DATABASE_URL:
+        raise ValueError("DATABASE_URL is not set. Please add your PostgreSQL URL to your environment variables.")
+    return psycopg2.connect(DATABASE_URL)
+
 def init_db():
-    conn = sqlite3.connect('bot_data.db')
+    if not DATABASE_URL:
+        logging.warning("DATABASE_URL is missing. Database will not be initialized.")
+        return
+        
+    conn = get_db_connection()
     c = conn.cursor()
     c.execute('''
         CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
+            user_id BIGINT PRIMARY KEY,
             credits INTEGER DEFAULT 0,
             last_bonus_date TEXT
         )
@@ -50,24 +62,25 @@ def init_db():
     
     # Safe schema migration for is_blocked
     try:
-        c.execute('ALTER TABLE users ADD COLUMN is_blocked BOOLEAN DEFAULT 0')
-    except sqlite3.OperationalError:
-        pass # Column already exists
+        c.execute('ALTER TABLE users ADD COLUMN is_blocked BOOLEAN DEFAULT FALSE')
+        conn.commit()
+    except DuplicateColumn:
+        conn.rollback() # Column already exists
         
     c.execute('''
         CREATE TABLE IF NOT EXISTS vouchers (
             code TEXT PRIMARY KEY,
             value INTEGER,
-            is_used BOOLEAN DEFAULT 0
+            is_used BOOLEAN DEFAULT FALSE
         )
     ''')
     conn.commit()
     conn.close()
 
 def get_user_data(user_id):
-    conn = sqlite3.connect('bot_data.db')
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute('SELECT credits, is_blocked FROM users WHERE user_id = ?', (user_id,))
+    c.execute('SELECT credits, is_blocked FROM users WHERE user_id = %s', (user_id,))
     row = c.fetchone()
     
     if row:
@@ -75,7 +88,7 @@ def get_user_data(user_id):
         return {"credits": row[0], "is_blocked": bool(row[1])}
     else:
         # Create user with 0 credits if they don't exist
-        c.execute('INSERT INTO users (user_id, credits, last_bonus_date, is_blocked) VALUES (?, 0, NULL, 0)', (user_id,))
+        c.execute('INSERT INTO users (user_id, credits, last_bonus_date, is_blocked) VALUES (%s, 0, NULL, FALSE)', (user_id,))
         conn.commit()
         conn.close()
         return {"credits": 0, "is_blocked": False}
@@ -86,24 +99,24 @@ def get_user_credits(user_id):
 def is_user_blocked(user_id):
     return get_user_data(user_id)["is_blocked"]
 
-def set_user_block_status(user_id, status: int):
-    conn = sqlite3.connect('bot_data.db')
+def set_user_block_status(user_id, status: bool):
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute('UPDATE users SET is_blocked = ? WHERE user_id = ?', (status, user_id))
+    c.execute('UPDATE users SET is_blocked = %s WHERE user_id = %s', (status, user_id))
     conn.commit()
     conn.close()
 
 def deduct_credit(user_id):
-    conn = sqlite3.connect('bot_data.db')
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute('UPDATE users SET credits = credits - 1 WHERE user_id = ?', (user_id,))
+    c.execute('UPDATE users SET credits = credits - 1 WHERE user_id = %s', (user_id,))
     conn.commit()
     conn.close()
 
 def add_credits(user_id, amount):
-    conn = sqlite3.connect('bot_data.db')
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute('UPDATE users SET credits = credits + ? WHERE user_id = ?', (amount, user_id))
+    c.execute('UPDATE users SET credits = credits + %s WHERE user_id = %s', (amount, user_id))
     conn.commit()
     conn.close()
 
@@ -112,33 +125,33 @@ def claim_daily_bonus(user_id):
     # Ensure user exists
     get_user_credits(user_id) 
     
-    conn = sqlite3.connect('bot_data.db')
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute('SELECT last_bonus_date FROM users WHERE user_id = ?', (user_id,))
+    c.execute('SELECT last_bonus_date FROM users WHERE user_id = %s', (user_id,))
     row = c.fetchone()
     
     if row and row[0] == today:
         conn.close()
         return False # Already claimed today
         
-    c.execute('UPDATE users SET credits = credits + 2, last_bonus_date = ? WHERE user_id = ?', (today, user_id))
+    c.execute('UPDATE users SET credits = credits + 2, last_bonus_date = %s WHERE user_id = %s', (today, user_id))
     conn.commit()
     conn.close()
     return True
 
 def generate_voucher_code(value):
     code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=10))
-    conn = sqlite3.connect('bot_data.db')
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute('INSERT INTO vouchers (code, value, is_used) VALUES (?, ?, 0)', (code, value))
+    c.execute('INSERT INTO vouchers (code, value, is_used) VALUES (%s, %s, FALSE)', (code, value))
     conn.commit()
     conn.close()
     return code
 
 def redeem_voucher_code(user_id, code):
-    conn = sqlite3.connect('bot_data.db')
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute('SELECT value, is_used FROM vouchers WHERE code = ?', (code,))
+    c.execute('SELECT value, is_used FROM vouchers WHERE code = %s', (code,))
     row = c.fetchone()
     
     if not row:
@@ -151,7 +164,7 @@ def redeem_voucher_code(user_id, code):
         return "❌ This voucher has already been redeemed."
         
     # Mark as used
-    c.execute('UPDATE vouchers SET is_used = 1 WHERE code = ?', (code,))
+    c.execute('UPDATE vouchers SET is_used = TRUE WHERE code = %s', (code,))
     conn.commit()
     conn.close()
     
@@ -399,12 +412,12 @@ async def manage_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_id = int(parts[2])
     
     if action == "block":
-        set_user_block_status(target_id, 1)
+        set_user_block_status(target_id, True)
         await query.edit_message_text(f"✅ User `{target_id}` has been blocked.", parse_mode="Markdown")
         await start(update, context)
         return CHOOSING
     elif action == "unblock":
-        set_user_block_status(target_id, 0)
+        set_user_block_status(target_id, False)
         await query.edit_message_text(f"✅ User `{target_id}` has been unblocked.", parse_mode="Markdown")
         await start(update, context)
         return CHOOSING
@@ -501,5 +514,5 @@ if __name__ == '__main__':
     
     app.add_handler(conv_handler)
 
-    print("Optimized interactive bot with Credit System & User Management is starting...")
+    print("Optimized interactive bot with Credit System & Postgres is starting...")
     app.run_polling()
