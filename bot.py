@@ -6,8 +6,8 @@ import random
 import string
 from datetime import date
 from keep_alive import keep_alive
-from telegram import Update, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
-from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters, ConversationHandler
+from telegram import Update, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ConversationHandler
 
 # Enable logging
 logging.basicConfig(
@@ -16,12 +16,12 @@ logging.basicConfig(
 )
 
 # Get the tokens from environment variables
-BOT_TOKEN = "8666028063:AAGG-NafYQ0VeMrh4Rdr7wYL3prdho1fEoc"
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("No BOT_TOKEN provided in environment variables")
 
 # Admin ID for generating vouchers (Replace 0 with your actual Telegram ID if you want to hardcode it, or use Render env var)
-ADMIN_ID = 5137400628
+ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 
 # Path to your remote Parquet dataset
 DATASET_URL_PHONE = "hf://datasets/WipeX00/scrappeddata/idx_phone.*.parquet"
@@ -33,7 +33,7 @@ con.execute("INSTALL httpfs;")
 con.execute("LOAD httpfs;")
 
 # States for the conversation
-CHOOSING, WAITING_FOR_PHONE, WAITING_FOR_DOC, WAITING_FOR_VOUCHER = range(4)
+CHOOSING, WAITING_FOR_PHONE, WAITING_FOR_DOC, WAITING_FOR_VOUCHER, WAITING_FOR_MANAGE_USER_ID, WAITING_FOR_MANAGE_CREDITS = range(6)
 
 # ================= Database & Credit System =================
 
@@ -47,6 +47,13 @@ def init_db():
             last_bonus_date TEXT
         )
     ''')
+    
+    # Safe schema migration for is_blocked
+    try:
+        c.execute('ALTER TABLE users ADD COLUMN is_blocked BOOLEAN DEFAULT 0')
+    except sqlite3.OperationalError:
+        pass # Column already exists
+        
     c.execute('''
         CREATE TABLE IF NOT EXISTS vouchers (
             code TEXT PRIMARY KEY,
@@ -57,21 +64,34 @@ def init_db():
     conn.commit()
     conn.close()
 
-def get_user_credits(user_id):
+def get_user_data(user_id):
     conn = sqlite3.connect('bot_data.db')
     c = conn.cursor()
-    c.execute('SELECT credits FROM users WHERE user_id = ?', (user_id,))
+    c.execute('SELECT credits, is_blocked FROM users WHERE user_id = ?', (user_id,))
     row = c.fetchone()
     
     if row:
         conn.close()
-        return row[0]
+        return {"credits": row[0], "is_blocked": bool(row[1])}
     else:
         # Create user with 0 credits if they don't exist
-        c.execute('INSERT INTO users (user_id, credits, last_bonus_date) VALUES (?, 0, NULL)', (user_id,))
+        c.execute('INSERT INTO users (user_id, credits, last_bonus_date, is_blocked) VALUES (?, 0, NULL, 0)', (user_id,))
         conn.commit()
         conn.close()
-        return 0
+        return {"credits": 0, "is_blocked": False}
+
+def get_user_credits(user_id):
+    return get_user_data(user_id)["credits"]
+
+def is_user_blocked(user_id):
+    return get_user_data(user_id)["is_blocked"]
+
+def set_user_block_status(user_id, status: int):
+    conn = sqlite3.connect('bot_data.db')
+    c = conn.cursor()
+    c.execute('UPDATE users SET is_blocked = ? WHERE user_id = ?', (status, user_id))
+    conn.commit()
+    conn.close()
 
 def deduct_credit(user_id):
     conn = sqlite3.connect('bot_data.db')
@@ -198,16 +218,23 @@ def format_results(results):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Send message on `/start` with reply keyboard buttons."""
+    user_id = update.effective_user.id
+    
     keyboard = [
         [KeyboardButton("📱 Number Info"), KeyboardButton("🪪 Aadhar Info")],
         [KeyboardButton("💰 Check Balance"), KeyboardButton("🎁 Daily Bonus")],
         [KeyboardButton("🎟️ Redeem Voucher"), KeyboardButton("💳 Buy Credits")]
     ]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     
+    if user_id == ADMIN_ID:
+        keyboard.append([KeyboardButton("🛠️ Manage Users")])
+        
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     text = "Welcome! I am the high-performance search bot.\nPlease choose what you want to do:"
     
-    await update.message.reply_text(text, reply_markup=reply_markup)
+    if update.message:
+        await update.message.reply_text(text, reply_markup=reply_markup)
+    
     return CHOOSING
 
 async def choice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -216,6 +243,9 @@ async def choice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     
     if choice == "📱 Number Info":
+        if is_user_blocked(user_id):
+            await update.message.reply_text("🚫 You have been blocked from using this bot.")
+            return CHOOSING
         if get_user_credits(user_id) <= 0:
             await update.message.reply_text("❌ You have 0 credits. Please claim your Daily Bonus or Buy Credits to search.")
             return CHOOSING
@@ -223,6 +253,9 @@ async def choice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return WAITING_FOR_PHONE
         
     elif choice == "🪪 Aadhar Info":
+        if is_user_blocked(user_id):
+            await update.message.reply_text("🚫 You have been blocked from using this bot.")
+            return CHOOSING
         if get_user_credits(user_id) <= 0:
             await update.message.reply_text("❌ You have 0 credits. Please claim your Daily Bonus or Buy Credits to search.")
             return CHOOSING
@@ -250,12 +283,23 @@ async def choice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Please enter your voucher code:", reply_markup=ReplyKeyboardRemove())
         return WAITING_FOR_VOUCHER
         
+    elif choice == "🛠️ Manage Users":
+        if user_id != ADMIN_ID:
+            return CHOOSING
+        await update.message.reply_text("Please enter the Telegram User ID you want to manage:", reply_markup=ReplyKeyboardRemove())
+        return WAITING_FOR_MANAGE_USER_ID
+        
     else:
         await update.message.reply_text("Please use the buttons provided at the bottom of your screen.")
         return CHOOSING
 
 async def handle_phone_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
+    if is_user_blocked(user_id):
+        await update.message.reply_text("🚫 You have been blocked from using this bot. Search cancelled.")
+        await start(update, context)
+        return CHOOSING
+        
     if get_user_credits(user_id) <= 0:
         await update.message.reply_text("❌ You have 0 credits. Search cancelled.")
         await start(update, context)
@@ -277,6 +321,11 @@ async def handle_phone_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def handle_doc_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
+    if is_user_blocked(user_id):
+        await update.message.reply_text("🚫 You have been blocked from using this bot. Search cancelled.")
+        await start(update, context)
+        return CHOOSING
+        
     if get_user_credits(user_id) <= 0:
         await update.message.reply_text("❌ You have 0 credits. Search cancelled.")
         await start(update, context)
@@ -303,6 +352,93 @@ async def handle_voucher_input(update: Update, context: ContextTypes.DEFAULT_TYP
     result_msg = redeem_voucher_code(user_id, code)
     await update.message.reply_text(result_msg)
     
+    await start(update, context)
+    return CHOOSING
+
+# ================= Admin User Management Logic =================
+
+async def handle_manage_user_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        target_id = int(update.message.text.strip())
+        context.user_data['manage_target_id'] = target_id
+    except ValueError:
+        await update.message.reply_text("❌ Invalid User ID. Must be a number.")
+        await start(update, context)
+        return CHOOSING
+        
+    user_data = get_user_data(target_id)
+    credits = user_data['credits']
+    is_blocked = user_data['is_blocked']
+    status_text = "🚫 Blocked" if is_blocked else "✅ Active"
+    
+    text = f"👤 **User ID:** `{target_id}`\n💰 **Credits:** {credits}\n🛡️ **Status:** {status_text}"
+    
+    block_button = InlineKeyboardButton("✅ Unblock User", callback_data=f"manage_unblock_{target_id}") if is_blocked else InlineKeyboardButton("🚫 Block User", callback_data=f"manage_block_{target_id}")
+    
+    keyboard = [
+        [InlineKeyboardButton("➕ Add Credits", callback_data=f"manage_add_{target_id}"), InlineKeyboardButton("➖ Deduct Credits", callback_data=f"manage_deduct_{target_id}")],
+        [block_button],
+        [InlineKeyboardButton("❌ Cancel", callback_data="manage_cancel")]
+    ]
+    
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+    return CHOOSING # Keep them in CHOOSING because the inline buttons will trigger a CallbackQueryHandler
+
+async def manage_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    
+    if data == "manage_cancel":
+        await query.edit_message_text("Management cancelled.")
+        await start(update, context)
+        return CHOOSING
+        
+    parts = data.split("_")
+    action = parts[1]
+    target_id = int(parts[2])
+    
+    if action == "block":
+        set_user_block_status(target_id, 1)
+        await query.edit_message_text(f"✅ User `{target_id}` has been blocked.", parse_mode="Markdown")
+        await start(update, context)
+        return CHOOSING
+    elif action == "unblock":
+        set_user_block_status(target_id, 0)
+        await query.edit_message_text(f"✅ User `{target_id}` has been unblocked.", parse_mode="Markdown")
+        await start(update, context)
+        return CHOOSING
+    elif action == "add":
+        context.user_data['manage_target_id'] = target_id
+        context.user_data['manage_action'] = "add"
+        await query.edit_message_text(f"Enter the amount of credits to ADD to user `{target_id}`:", parse_mode="Markdown")
+        return WAITING_FOR_MANAGE_CREDITS
+    elif action == "deduct":
+        context.user_data['manage_target_id'] = target_id
+        context.user_data['manage_action'] = "deduct"
+        await query.edit_message_text(f"Enter the amount of credits to DEDUCT from user `{target_id}`:", parse_mode="Markdown")
+        return WAITING_FOR_MANAGE_CREDITS
+        
+    return CHOOSING
+
+async def handle_manage_credits(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    target_id = context.user_data.get('manage_target_id')
+    action = context.user_data.get('manage_action')
+    
+    try:
+        amount = int(update.message.text.strip())
+    except ValueError:
+        await update.message.reply_text("❌ Invalid amount. Must be a number.")
+        await start(update, context)
+        return CHOOSING
+        
+    if action == "add":
+        add_credits(target_id, amount)
+        await update.message.reply_text(f"✅ Added {amount} credits to user `{target_id}`.", parse_mode="Markdown")
+    elif action == "deduct":
+        add_credits(target_id, -amount)
+        await update.message.reply_text(f"✅ Deducted {amount} credits from user `{target_id}`.", parse_mode="Markdown")
+        
     await start(update, context)
     return CHOOSING
 
@@ -346,18 +482,24 @@ if __name__ == '__main__':
     conv_handler = ConversationHandler(
         entry_points=[
             CommandHandler("start", start),
-            MessageHandler(filters.Regex('^(📱 Number Info|🪪 Aadhar Info|💰 Check Balance|🎁 Daily Bonus|🎟️ Redeem Voucher|💳 Buy Credits)$'), choice_handler)
+            MessageHandler(filters.Regex('^(📱 Number Info|🪪 Aadhar Info|💰 Check Balance|🎁 Daily Bonus|🎟️ Redeem Voucher|💳 Buy Credits|🛠️ Manage Users)$'), choice_handler),
+            CallbackQueryHandler(manage_callback, pattern="^manage_")
         ],
         states={
-            CHOOSING: [MessageHandler(filters.TEXT & ~filters.COMMAND, choice_handler)],
+            CHOOSING: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, choice_handler),
+                CallbackQueryHandler(manage_callback, pattern="^manage_")
+            ],
             WAITING_FOR_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_phone_input)],
             WAITING_FOR_DOC: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_doc_input)],
             WAITING_FOR_VOUCHER: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_voucher_input)],
+            WAITING_FOR_MANAGE_USER_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_manage_user_id)],
+            WAITING_FOR_MANAGE_CREDITS: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_manage_credits)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
     
     app.add_handler(conv_handler)
 
-    print("Optimized interactive bot with Credit System is starting...")
+    print("Optimized interactive bot with Credit System & User Management is starting...")
     app.run_polling()
