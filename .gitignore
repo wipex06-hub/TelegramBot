@@ -6,3 +6,6 @@ __pycache__/
 .env
 .venv/
 venv/
+scratch_*.py
+check_schema.py
+*.json

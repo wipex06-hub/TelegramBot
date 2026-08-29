@@ -29,6 +29,7 @@ ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 # Path to your remote Parquet dataset
 DATASET_URL_PHONE = "hf://datasets/WipeX00/scrappeddata/idx_phone.*.parquet"
 DATASET_URL_AADHAR = "hf://datasets/WipeX00/scrappeddata/idx_aadhar.*.parquet"
+DATASET_URL_TELEGRAM = "hf://datasets/WipeX00/Telegram-Dataset/data_*.parquet"
 
 # Initialize DuckDB and install httpfs extension for Hugging Face support
 con = duckdb.connect(':memory:')
@@ -36,7 +37,7 @@ con.execute("INSTALL httpfs;")
 con.execute("LOAD httpfs;")
 
 # States for the conversation
-CHOOSING, WAITING_FOR_PHONE, WAITING_FOR_DOC, WAITING_FOR_VOUCHER, WAITING_FOR_MANAGE_USER_ID, WAITING_FOR_MANAGE_CREDITS = range(6)
+CHOOSING, WAITING_FOR_PHONE, WAITING_FOR_DOC, WAITING_FOR_VOUCHER, WAITING_FOR_MANAGE_USER_ID, WAITING_FOR_MANAGE_CREDITS, WAITING_FOR_TELEGRAM = range(7)
 
 # ================= Database & Credit System =================
 
@@ -282,6 +283,50 @@ def format_results(results):
         response = response[:4000] + "\n... (results truncated)"
     return response
 
+def search_by_telegram(query_str: str):
+    try:
+        query = f"""
+            SELECT 
+                "524189866" AS id, 
+                "YanaGosteeva" AS username, 
+                "Яна" AS first_name, 
+                "Гостеева" AS last_name, 
+                "Unnamed: 4" AS phone, 
+                "recently" AS last_seen
+            FROM read_parquet('{DATASET_URL_TELEGRAM}') 
+            WHERE "524189866" = ? OR "YanaGosteeva" ILIKE ? 
+            LIMIT 10
+        """
+        return con.execute(query, [query_str, query_str]).fetchall()
+    except Exception as e:
+        logging.error(f"Search error: {e}")
+        return None
+
+def format_telegram_results(results):
+    response_lines = [f"Found {len(results)} record(s):"]
+    for i, row in enumerate(results, 1):
+        tg_id, username, first_name, last_name, phone, last_seen = row
+        
+        name_parts = [p for p in (first_name, last_name) if p and str(p).lower() != 'none']
+        full_name = " ".join(name_parts) if name_parts else "N/A"
+        
+        user_str = f"@{username}" if username and str(username).lower() != 'none' else "N/A"
+        
+        record = (
+            f"\n--- Record {i} ---\n"
+            f"🆔 ID: {tg_id or 'N/A'}\n"
+            f"👤 Username: {user_str}\n"
+            f"📛 Name: {full_name}\n"
+            f"📱 Phone: {phone or 'N/A'}\n"
+            f"👁️ Last Seen: {last_seen or 'N/A'}"
+        )
+        response_lines.append(record)
+        
+    response = "\n".join(response_lines)
+    if len(response) > 4000:
+        response = response[:4000] + "\n... (results truncated)"
+    return response
+
 # ================= Handlers =================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -290,8 +335,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     keyboard = [
         [KeyboardButton("📱 Number Info"), KeyboardButton("🪪 Aadhar Info")],
-        [KeyboardButton("💰 Check Balance"), KeyboardButton("🎁 Daily Bonus")],
-        [KeyboardButton("🎟️ Redeem Voucher"), KeyboardButton("💳 Buy Credits")]
+        [KeyboardButton("💬 Telegram Search"), KeyboardButton("💰 Check Balance")],
+        [KeyboardButton("🎁 Daily Bonus"), KeyboardButton("🎟️ Redeem Voucher")],
+        [KeyboardButton("💳 Buy Credits")]
     ]
     
     if user_id == ADMIN_ID:
@@ -329,6 +375,16 @@ async def choice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return CHOOSING
         await update.message.reply_text("Please enter the Aadhar number you want to search (Costs 1 credit):", reply_markup=ReplyKeyboardRemove())
         return WAITING_FOR_DOC
+        
+    elif choice == "💬 Telegram Search":
+        if is_user_blocked(user_id):
+            await update.message.reply_text("🚫 You have been blocked from using this bot.")
+            return CHOOSING
+        if get_user_credits(user_id) < 2:
+            await update.message.reply_text("❌ You need at least 2 credits to search Telegram. Please claim your Daily Bonus or Buy Credits.")
+            return CHOOSING
+        await update.message.reply_text("Please enter the Telegram User ID or Username you want to search (Costs 2 credits):", reply_markup=ReplyKeyboardRemove())
+        return WAITING_FOR_TELEGRAM
         
     elif choice == "💰 Check Balance":
         credits = get_user_credits(user_id)
@@ -409,6 +465,33 @@ async def handle_doc_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(format_results(results))
     else:
         await update.message.reply_text("No user found with that Aadhar number. (No credits deducted)")
+        
+    await start(update, context)
+    return CHOOSING
+
+async def handle_telegram_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    if is_user_blocked(user_id):
+        await update.message.reply_text("🚫 You have been blocked from using this bot. Search cancelled.")
+        await start(update, context)
+        return CHOOSING
+        
+    if get_user_credits(user_id) < 2:
+        await update.message.reply_text("❌ You need at least 2 credits to search Telegram. Search cancelled.")
+        await start(update, context)
+        return CHOOSING
+        
+    query_str = update.message.text.strip().lstrip('@')
+    await update.message.reply_text("Searching user data, please wait...")
+    
+    results = search_by_telegram(query_str)
+    
+    if results:
+        deduct_credit(user_id)
+        deduct_credit(user_id)
+        await update.message.reply_text(format_telegram_results(results))
+    else:
+        await update.message.reply_text("No user found with that ID or username. (No credits deducted)")
         
     await start(update, context)
     return CHOOSING
@@ -573,7 +656,7 @@ if __name__ == '__main__':
     conv_handler = ConversationHandler(
         entry_points=[
             CommandHandler("start", start),
-            MessageHandler(filters.Regex('^(📱 Number Info|🪪 Aadhar Info|💰 Check Balance|🎁 Daily Bonus|🎟️ Redeem Voucher|💳 Buy Credits|🛠️ Manage Users)$'), choice_handler),
+            MessageHandler(filters.Regex('^(📱 Number Info|🪪 Aadhar Info|💬 Telegram Search|💰 Check Balance|🎁 Daily Bonus|🎟️ Redeem Voucher|💳 Buy Credits|🛠️ Manage Users)$'), choice_handler),
             CallbackQueryHandler(manage_callback, pattern="^manage_")
         ],
         states={
@@ -583,6 +666,7 @@ if __name__ == '__main__':
             ],
             WAITING_FOR_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_phone_input)],
             WAITING_FOR_DOC: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_doc_input)],
+            WAITING_FOR_TELEGRAM: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_telegram_input)],
             WAITING_FOR_VOUCHER: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_voucher_input)],
             WAITING_FOR_MANAGE_USER_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_manage_user_id)],
             WAITING_FOR_MANAGE_CREDITS: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_manage_credits)],
