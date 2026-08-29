@@ -5,7 +5,7 @@ import random
 import string
 import psycopg2
 from psycopg2.errors import DuplicateColumn
-from datetime import date
+from datetime import date, datetime
 from keep_alive import keep_alive
 from telegram import Update, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ConversationHandler
@@ -415,11 +415,31 @@ async def handle_doc_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_voucher_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     code = update.message.text.strip()
-    user_id = update.message.from_user.id
+    user = update.message.from_user
     
-    result_msg = redeem_voucher_code(user_id, code)
+    result_msg = redeem_voucher_code(user.id, code)
     await update.message.reply_text(result_msg)
     
+    # If redemption was successful, notify the admin
+    if result_msg.startswith("✅"):
+        username = f"@{user.username}" if user.username else "No Username"
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        try:
+            await context.bot.send_message(
+                chat_id=ADMIN_ID,
+                text=(
+                    f"🔔 *Voucher Redeemed!*\n\n"
+                    f"👤 *User:* {username}\n"
+                    f"🆔 *User ID:* `{user.id}`\n"
+                    f"🎟️ *Code:* `{code}`\n"
+                    f"⏰ *Time:* {current_time}"
+                ),
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            logging.error(f"Failed to send admin notification: {e}")
+            
     await start(update, context)
     return CHOOSING
 
