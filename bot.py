@@ -56,17 +56,31 @@ def init_db():
         CREATE TABLE IF NOT EXISTS users (
             user_id BIGINT PRIMARY KEY,
             credits INTEGER DEFAULT 0,
-            last_bonus_date TEXT
+            last_bonus_date TEXT,
+            is_blocked BOOLEAN DEFAULT FALSE
         )
     ''')
     
-    # Safe schema migration for is_blocked
+    # Safe schema migration for is_blocked (just in case it's missing)
     try:
         c.execute('ALTER TABLE users ADD COLUMN is_blocked BOOLEAN DEFAULT FALSE')
         conn.commit()
     except DuplicateColumn:
-        conn.rollback() # Column already exists
+        conn.rollback()
         
+    # Safe schema migration for bonus buckets
+    try:
+        c.execute('ALTER TABLE users ADD COLUMN bonus_credits INTEGER DEFAULT 0')
+        conn.commit()
+    except DuplicateColumn:
+        conn.rollback()
+        
+    try:
+        c.execute('ALTER TABLE users ADD COLUMN bonus_expiry TIMESTAMP')
+        conn.commit()
+    except DuplicateColumn:
+        conn.rollback()
+
     c.execute('''
         CREATE TABLE IF NOT EXISTS vouchers (
             code TEXT PRIMARY KEY,
@@ -77,24 +91,43 @@ def init_db():
     conn.commit()
     conn.close()
 
-def get_user_data(user_id):
+def _check_and_expire_bonus(user_id):
+    """Internal helper to wipe expired bonus credits before checking balances."""
     conn = get_db_connection()
     c = conn.cursor()
-    c.execute('SELECT credits, is_blocked FROM users WHERE user_id = %s', (user_id,))
+    # Reset bonus_credits to 0 if the current time is past the expiry time
+    c.execute('''
+        UPDATE users 
+        SET bonus_credits = 0 
+        WHERE user_id = %s 
+        AND bonus_expiry IS NOT NULL 
+        AND NOW() > bonus_expiry
+    ''', (user_id,))
+    conn.commit()
+    conn.close()
+
+def get_user_data(user_id):
+    # First, expire any old bonuses
+    _check_and_expire_bonus(user_id)
+    
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('SELECT credits, bonus_credits, is_blocked FROM users WHERE user_id = %s', (user_id,))
     row = c.fetchone()
     
     if row:
         conn.close()
-        return {"credits": row[0], "is_blocked": bool(row[1])}
+        return {"credits": row[0], "bonus_credits": row[1], "is_blocked": bool(row[2])}
     else:
         # Create user with 0 credits if they don't exist
-        c.execute('INSERT INTO users (user_id, credits, last_bonus_date, is_blocked) VALUES (%s, 0, NULL, FALSE)', (user_id,))
+        c.execute('INSERT INTO users (user_id, credits, bonus_credits, is_blocked) VALUES (%s, 0, 0, FALSE)', (user_id,))
         conn.commit()
         conn.close()
-        return {"credits": 0, "is_blocked": False}
+        return {"credits": 0, "bonus_credits": 0, "is_blocked": False}
 
 def get_user_credits(user_id):
-    return get_user_data(user_id)["credits"]
+    data = get_user_data(user_id)
+    return data["credits"] + data["bonus_credits"]
 
 def is_user_blocked(user_id):
     return get_user_data(user_id)["is_blocked"]
@@ -107,13 +140,26 @@ def set_user_block_status(user_id, status: bool):
     conn.close()
 
 def deduct_credit(user_id):
+    # Expire old bonuses first to ensure we don't spend an expired credit
+    _check_and_expire_bonus(user_id)
+    
     conn = get_db_connection()
     c = conn.cursor()
-    c.execute('UPDATE users SET credits = credits - 1 WHERE user_id = %s', (user_id,))
+    c.execute('SELECT bonus_credits FROM users WHERE user_id = %s', (user_id,))
+    row = c.fetchone()
+    
+    if row and row[0] > 0:
+        # Deduct from bonus credits first
+        c.execute('UPDATE users SET bonus_credits = bonus_credits - 1 WHERE user_id = %s', (user_id,))
+    else:
+        # Otherwise deduct from permanent credits
+        c.execute('UPDATE users SET credits = credits - 1 WHERE user_id = %s', (user_id,))
+        
     conn.commit()
     conn.close()
 
 def add_credits(user_id, amount):
+    # This is for admin adding/deducting PERMANENT credits, or voucher redemptions
     conn = get_db_connection()
     c = conn.cursor()
     c.execute('UPDATE users SET credits = credits + %s WHERE user_id = %s', (amount, user_id))
@@ -121,20 +167,29 @@ def add_credits(user_id, amount):
     conn.close()
 
 def claim_daily_bonus(user_id):
-    today = str(date.today())
+    _check_and_expire_bonus(user_id)
     # Ensure user exists
-    get_user_credits(user_id) 
+    get_user_data(user_id)
     
     conn = get_db_connection()
     c = conn.cursor()
-    c.execute('SELECT last_bonus_date FROM users WHERE user_id = %s', (user_id,))
+    
+    # Check if they currently have a valid, unexpired bonus period active
+    # (If NOW() > bonus_expiry, it would have been wiped by _check_and_expire_bonus)
+    c.execute('SELECT bonus_expiry FROM users WHERE user_id = %s', (user_id,))
     row = c.fetchone()
     
-    if row and row[0] == today:
+    if row and row[0] is not None:
+        # If it's not None, it means the expiry is in the future. They can't claim yet.
         conn.close()
-        return False # Already claimed today
+        return False
         
-    c.execute('UPDATE users SET credits = credits + 2, last_bonus_date = %s WHERE user_id = %s', (today, user_id))
+    # Claim the bonus: Give 2 bonus credits and set expiry to exactly 24 hours from now
+    c.execute('''
+        UPDATE users 
+        SET bonus_credits = 2, bonus_expiry = NOW() + INTERVAL '24 hours' 
+        WHERE user_id = %s
+    ''', (user_id,))
     conn.commit()
     conn.close()
     return True
@@ -168,11 +223,11 @@ def redeem_voucher_code(user_id, code):
     conn.commit()
     conn.close()
     
-    # Ensure user exists and add credits
-    get_user_credits(user_id)
+    # Add permanent credits
+    get_user_data(user_id) # ensure user exists
     add_credits(user_id, value)
     
-    return f"✅ Success! You have redeemed {value} credits."
+    return f"✅ Success! You have redeemed {value} permanent credits."
 
 # ================= Search Logic =================
 
@@ -283,13 +338,13 @@ async def choice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif choice == "🎁 Daily Bonus":
         success = claim_daily_bonus(user_id)
         if success:
-            await update.message.reply_text("🎉 You have successfully claimed your daily 2 free credits!")
+            await update.message.reply_text("🎉 You have successfully claimed your daily 2 free credits! (Valid for 24 hours)")
         else:
-            await update.message.reply_text("❌ You have already claimed your daily bonus today. Come back tomorrow!")
+            await update.message.reply_text("❌ You have already claimed your daily bonus recently. Please wait exactly 24 hours from your last claim!")
         return CHOOSING
         
     elif choice == "💳 Buy Credits":
-        await update.message.reply_text("🛒 To buy credits, please contact the admin on Telegram: @WIPE_X")
+        await update.message.reply_text("🛒 To buy permanent credits, please contact the admin on Telegram: @WIPE_X")
         return CHOOSING
         
     elif choice == "🎟️ Redeem Voucher":
@@ -380,16 +435,19 @@ async def handle_manage_user_id(update: Update, context: ContextTypes.DEFAULT_TY
         return CHOOSING
         
     user_data = get_user_data(target_id)
-    credits = user_data['credits']
+    perm_credits = user_data['credits']
+    bonus_credits = user_data['bonus_credits']
+    total_credits = perm_credits + bonus_credits
     is_blocked = user_data['is_blocked']
     status_text = "🚫 Blocked" if is_blocked else "✅ Active"
     
-    text = f"👤 **User ID:** `{target_id}`\n💰 **Credits:** {credits}\n🛡️ **Status:** {status_text}"
+    text = f"👤 **User ID:** `{target_id}`\n💰 **Total Credits:** {total_credits} _(Perm: {perm_credits}, Bonus: {bonus_credits})_\n🛡️ **Status:** {status_text}"
     
     block_button = InlineKeyboardButton("✅ Unblock User", callback_data=f"manage_unblock_{target_id}") if is_blocked else InlineKeyboardButton("🚫 Block User", callback_data=f"manage_block_{target_id}")
     
     keyboard = [
-        [InlineKeyboardButton("➕ Add Credits", callback_data=f"manage_add_{target_id}"), InlineKeyboardButton("➖ Deduct Credits", callback_data=f"manage_deduct_{target_id}")],
+        [InlineKeyboardButton("➕ Add Permanent Credits", callback_data=f"manage_add_{target_id}")],
+        [InlineKeyboardButton("➖ Deduct Permanent Credits", callback_data=f"manage_deduct_{target_id}")],
         [block_button],
         [InlineKeyboardButton("❌ Cancel", callback_data="manage_cancel")]
     ]
@@ -424,12 +482,12 @@ async def manage_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == "add":
         context.user_data['manage_target_id'] = target_id
         context.user_data['manage_action'] = "add"
-        await query.edit_message_text(f"Enter the amount of credits to ADD to user `{target_id}`:", parse_mode="Markdown")
+        await query.edit_message_text(f"Enter the amount of PERMANENT credits to ADD to user `{target_id}`:", parse_mode="Markdown")
         return WAITING_FOR_MANAGE_CREDITS
     elif action == "deduct":
         context.user_data['manage_target_id'] = target_id
         context.user_data['manage_action'] = "deduct"
-        await query.edit_message_text(f"Enter the amount of credits to DEDUCT from user `{target_id}`:", parse_mode="Markdown")
+        await query.edit_message_text(f"Enter the amount of PERMANENT credits to DEDUCT from user `{target_id}`:", parse_mode="Markdown")
         return WAITING_FOR_MANAGE_CREDITS
         
     return CHOOSING
@@ -447,10 +505,10 @@ async def handle_manage_credits(update: Update, context: ContextTypes.DEFAULT_TY
         
     if action == "add":
         add_credits(target_id, amount)
-        await update.message.reply_text(f"✅ Added {amount} credits to user `{target_id}`.", parse_mode="Markdown")
+        await update.message.reply_text(f"✅ Added {amount} permanent credits to user `{target_id}`.", parse_mode="Markdown")
     elif action == "deduct":
         add_credits(target_id, -amount)
-        await update.message.reply_text(f"✅ Deducted {amount} credits from user `{target_id}`.", parse_mode="Markdown")
+        await update.message.reply_text(f"✅ Deducted {amount} permanent credits from user `{target_id}`.", parse_mode="Markdown")
         
     await start(update, context)
     return CHOOSING
