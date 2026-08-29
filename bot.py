@@ -146,7 +146,7 @@ def redeem_voucher_code(user_id, code):
 def search_by_phone(phone_number: str):
     try:
         query = f"""
-            SELECT name, fathersName, aadharNumber, phoneNumber, address, town, district, state, pincode
+            SELECT name, fathersName, aadharNumber, phoneNumber, otherNumber, address, town, district, state, pincode
             FROM read_parquet('{DATASET_URL_PHONE}') 
             WHERE phoneNumber = ? 
             LIMIT 10
@@ -159,7 +159,7 @@ def search_by_phone(phone_number: str):
 def search_by_doc_id(doc_id: str):
     try:
         query = f"""
-            SELECT name, fathersName, aadharNumber, phoneNumber, address, town, district, state, pincode 
+            SELECT name, fathersName, aadharNumber, phoneNumber, otherNumber, address, town, district, state, pincode 
             FROM read_parquet('{DATASET_URL_AADHAR}') 
             WHERE aadharNumber = ? 
             LIMIT 10
@@ -172,7 +172,7 @@ def search_by_doc_id(doc_id: str):
 def format_results(results):
     response_lines = [f"Found {len(results)} record(s):"]
     for i, row in enumerate(results, 1):
-        name, fathers_name, doc_id, phone, address, town, district, state, pincode = row
+        name, fathers_name, doc_id, phone, other_phone, address, town, district, state, pincode = row
         
         addr_parts = [p for p in [address, town, district, state, pincode] if p and str(p).lower() != 'none']
         full_address = ", ".join(str(p) for p in addr_parts) if addr_parts else "N/A"
@@ -182,6 +182,7 @@ def format_results(results):
             f"👤 Name: {name or 'N/A'}\n"
             f"👨 Father's Name: {fathers_name or 'N/A'}\n"
             f"📱 Phone: {phone or 'N/A'}\n"
+            f"📞 Alt Phone: {other_phone or 'N/A'}\n"
             f"🪪 Aadhar: {doc_id or 'N/A'}\n"
             f"📍 Address: {full_address}\n"
             f"🌍 Circle: {state or 'N/A'}"
