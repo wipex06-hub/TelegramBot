@@ -635,7 +635,7 @@ async def handle_email_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     results = await asyncio.to_thread(search_by_email, email_str)
     
-    if results and (results.get('fallback_1') or results.get('fallback_2')):
+    if results and results.get('merged'):
         deduct_credit(user_id)
         await update.message.reply_text(format_combined_results(results))
     else:
