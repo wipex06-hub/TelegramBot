@@ -319,57 +319,41 @@ def search_by_email(email_str: str):
         for row2 in res_2:
             number, name2, address2, email2, gender, carrier = row2
             if number:
-                # Query INDDATA
-                query_1 = f"""
-                    SELECT mobile, name, fname, address, alt, circle, id, email
-                    FROM read_parquet('{DATASET_URL_INDDATA}')
-                    WHERE mobile = ?
-                    LIMIT 1
-                """
-                res_1 = con.execute(query_1, [number]).fetchall()
-                
-                # Query Primary Phone Dataset for alternate numbers
+                # Query Primary Phone Dataset
                 query_phone = f"""
-                    SELECT otherNumber, fathersName, aadharNumber, address, town, district, state, pincode
+                    SELECT name, otherNumber, fathersName, aadharNumber, address, town, district, state, pincode
                     FROM read_parquet('{DATASET_URL_PHONE}') 
                     WHERE phoneNumber = ? 
                     LIMIT 1
                 """
                 res_phone = con.execute(query_phone, [number]).fetchall()
                 
-                alt_phone_primary = res_phone[0][0] if res_phone else None
-                fathers_primary = res_phone[0][1] if res_phone else None
-                aadhar_primary = res_phone[0][2] if res_phone else None
-                
-                if res_1:
-                    mobile, name1, fname, address1, alt, circle, doc_id, email1 = res_1[0]
-                    merged_dict = {
-                        'name': name1 or name2,
-                        'fname': fname or fathers_primary,
-                        'phone': number,
-                        'alt_phone': alt or alt_phone_primary,
-                        'email': email2 or email1,
-                        'doc_id': doc_id or aadhar_primary,
-                        'gender': gender,
-                        'carrier': carrier,
-                        'address': address1 if address1 and str(address1).lower() != 'none' else address2,
-                        'circle': circle
-                    }
-                    merged_results.append(merged_dict)
-                else:
-                    merged_dict = {
-                        'name': name2,
-                        'fname': fathers_primary,
-                        'phone': number,
-                        'alt_phone': alt_phone_primary,
-                        'email': email2,
-                        'doc_id': aadhar_primary,
-                        'gender': gender,
-                        'carrier': carrier,
-                        'address': address2,
-                        'circle': None
-                    }
-                    merged_results.append(merged_dict)
+                name_primary = res_phone[0][0] if res_phone else None
+                alt_phone_primary = res_phone[0][1] if res_phone else None
+                fathers_primary = res_phone[0][2] if res_phone else None
+                aadhar_primary = res_phone[0][3] if res_phone else None
+                address_primary = res_phone[0][4] if res_phone else None
+                town_primary = res_phone[0][5] if res_phone else None
+                district_primary = res_phone[0][6] if res_phone else None
+                state_primary = res_phone[0][7] if res_phone else None
+                pincode_primary = res_phone[0][8] if res_phone else None
+
+                addr_parts = [p for p in [address_primary, town_primary, district_primary, state_primary, pincode_primary] if p and str(p).lower() != 'none']
+                full_address_primary = ", ".join(str(p) for p in addr_parts) if addr_parts else None
+
+                merged_dict = {
+                    'name': name_primary or name2,
+                    'fname': fathers_primary,
+                    'phone': number,
+                    'alt_phone': alt_phone_primary,
+                    'email': email2,
+                    'doc_id': aadhar_primary,
+                    'gender': gender,
+                    'carrier': carrier,
+                    'address': full_address_primary if full_address_primary else address2,
+                    'circle': state_primary
+                }
+                merged_results.append(merged_dict)
             else:
                 merged_dict = {
                     'name': name2,
