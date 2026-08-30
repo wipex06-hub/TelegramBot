@@ -7,6 +7,7 @@ __pycache__/
 .venv/
 venv/
 scratch_*.py
+test_*.py
 check_schema.py
 *.json
 *.duckdb

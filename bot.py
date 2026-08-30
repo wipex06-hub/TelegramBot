@@ -274,14 +274,6 @@ def search_by_phone(phone_number: str):
 
 def search_by_email(email_str: str):
     try:
-        query_1 = f"""
-            SELECT mobile, name, fname, address, alt, circle, id, email
-            FROM read_parquet('{DATASET_URL_INDDATA}')
-            WHERE email = ?
-            LIMIT 10
-        """
-        res_1 = con.execute(query_1, [email_str]).fetchall()
-        
         query_2 = f"""
             SELECT Number, Name, Address, Email, Gender, Carrier
             FROM read_parquet('{DATASET_URL_TIRUCALLER}')
@@ -289,6 +281,18 @@ def search_by_email(email_str: str):
             LIMIT 10
         """
         res_2 = con.execute(query_2, [email_str]).fetchall()
+        
+        if res_2:
+            return {"fallback_1": [], "fallback_2": res_2}
+            
+        # If not found in TIRUCALLER, try INDDATA (Warning: Full scan of 88GB)
+        query_1 = f"""
+            SELECT mobile, name, fname, address, alt, circle, id, email
+            FROM read_parquet('{DATASET_URL_INDDATA}')
+            WHERE email = ?
+            LIMIT 10
+        """
+        res_1 = con.execute(query_1, [email_str]).fetchall()
         
         return {"fallback_1": res_1, "fallback_2": res_2}
     except Exception as e:
