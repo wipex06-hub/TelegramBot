@@ -2,6 +2,7 @@ import logging
 import duckdb
 import os
 import asyncio
+import urllib.request
 import random
 import string
 import psycopg2
@@ -31,7 +32,17 @@ ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 DATASET_URL_PHONE = "hf://datasets/WipeX00/scrappeddata/idx_phone.*.parquet"
 DATASET_URL_AADHAR = "hf://datasets/WipeX00/scrappeddata/idx_aadhar.*.parquet"
 DATASET_URL_INDDATA = "https://huggingface.co/datasets/WipeX00/Inddatainonefile/resolve/main/users_data.parquet"
-DATASET_URL_TIRUCALLER = "https://huggingface.co/datasets/WipeX00/tirucaller/resolve/main/idx_email.parquet"
+
+LOCAL_TIRUCALLER = "idx_email.parquet"
+if not os.path.exists(LOCAL_TIRUCALLER):
+    print("Downloading TIRUCALLER dataset (1.9GB) to local disk for ultra-fast email searches. This may take a minute...")
+    try:
+        urllib.request.urlretrieve("https://huggingface.co/datasets/WipeX00/tirucaller/resolve/main/idx_email.parquet", LOCAL_TIRUCALLER)
+        print("Download complete!")
+    except Exception as e:
+        print(f"Failed to download TIRUCALLER: {e}")
+        LOCAL_TIRUCALLER = "https://huggingface.co/datasets/WipeX00/tirucaller/resolve/main/idx_email.parquet"
+DATASET_URL_TIRUCALLER = LOCAL_TIRUCALLER
 
 # Initialize DuckDB and install httpfs extension for Hugging Face support
 con = duckdb.connect('bot.duckdb')
@@ -155,6 +166,14 @@ def get_user_data(user_id):
 def get_user_credits(user_id):
     data = get_user_data(user_id)
     return data["credits"] + data["bonus_credits"]
+
+def get_all_users():
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('SELECT user_id, credits, bonus_credits, is_blocked FROM users')
+    rows = c.fetchall()
+    conn.close()
+    return rows
 
 def is_user_blocked(user_id):
     return get_user_data(user_id)["is_blocked"]
@@ -575,12 +594,38 @@ async def choice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif choice == "🛠️ Manage Users":
         if user_id != ADMIN_ID:
             return CHOOSING
-        await update.message.reply_text("Please enter the Telegram User ID you want to manage:", reply_markup=ReplyKeyboardRemove())
+            
+        all_users = get_all_users()
+        user_list_str = "👥 *Registered Users:*\n"
+        if not all_users:
+            user_list_str += "No users found.\n"
+        else:
+            for uid, creds, bonus, blocked in all_users:
+                status = "🚫 Blocked" if blocked else "✅ Active"
+                user_list_str += f"- `{uid}` (Credits: {creds}, Bonus: {bonus}) [{status}]\n"
+                
+        if len(user_list_str) > 3900:
+            user_list_str = user_list_str[:3900] + "\n... (list truncated)"
+            
+        msg = f"{user_list_str}\n\nPlease enter the Telegram User ID you want to manage:"
+        await update.message.reply_text(msg, reply_markup=ReplyKeyboardRemove(), parse_mode='Markdown')
         return WAITING_FOR_MANAGE_USER_ID
         
     else:
         await update.message.reply_text("Please use the buttons provided at the bottom of your screen.")
         return CHOOSING
+
+async def loading_animation(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int):
+    idx = 0
+    while True:
+        try:
+            await asyncio.sleep(2)
+            idx = (idx + 1) % len(SEARCH_MESSAGES)
+            await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=SEARCH_MESSAGES[idx])
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            pass
 
 async def handle_phone_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -595,9 +640,16 @@ async def handle_phone_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return CHOOSING
         
     phone_number = update.message.text.strip()
-    await update.message.reply_text(random.choice(SEARCH_MESSAGES))
+    msg = await update.message.reply_text(random.choice(SEARCH_MESSAGES))
+    animation_task = asyncio.create_task(loading_animation(context, update.message.chat_id, msg.message_id))
     
     results = await asyncio.to_thread(search_by_phone, phone_number)
+    
+    animation_task.cancel()
+    try:
+        await context.bot.delete_message(chat_id=update.message.chat_id, message_id=msg.message_id)
+    except Exception:
+        pass
     
     if results and (results.get('primary') or results.get('fallback_1') or results.get('fallback_2')):
         deduct_credit(user_id)
@@ -621,9 +673,16 @@ async def handle_doc_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return CHOOSING
         
     doc_id = update.message.text.strip()
-    await update.message.reply_text(random.choice(SEARCH_MESSAGES))
+    msg = await update.message.reply_text(random.choice(SEARCH_MESSAGES))
+    animation_task = asyncio.create_task(loading_animation(context, update.message.chat_id, msg.message_id))
     
     results = await asyncio.to_thread(search_by_doc_id, doc_id)
+    
+    animation_task.cancel()
+    try:
+        await context.bot.delete_message(chat_id=update.message.chat_id, message_id=msg.message_id)
+    except Exception:
+        pass
     
     if results:
         deduct_credit(user_id)
@@ -647,9 +706,16 @@ async def handle_email_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return CHOOSING
         
     email_str = update.message.text.strip()
-    await update.message.reply_text(random.choice(SEARCH_MESSAGES))
+    msg = await update.message.reply_text(random.choice(SEARCH_MESSAGES))
+    animation_task = asyncio.create_task(loading_animation(context, update.message.chat_id, msg.message_id))
     
     results = await asyncio.to_thread(search_by_email, email_str)
+    
+    animation_task.cancel()
+    try:
+        await context.bot.delete_message(chat_id=update.message.chat_id, message_id=msg.message_id)
+    except Exception:
+        pass
     
     if results and results.get('merged'):
         deduct_credit(user_id)
