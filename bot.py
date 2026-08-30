@@ -39,6 +39,11 @@ con.execute("PRAGMA threads=2;")
 con.execute("INSTALL httpfs;")
 con.execute("LOAD httpfs;")
 
+# Setup Hugging Face Authentication if token is provided
+hf_token = os.environ.get("HF_TOKEN")
+if hf_token:
+    con.execute(f"CREATE SECRET (TYPE HUGGINGFACE, TOKEN '{hf_token}');")
+
 # States for the conversation
 CHOOSING, WAITING_FOR_PHONE, WAITING_FOR_DOC, WAITING_FOR_VOUCHER, WAITING_FOR_MANAGE_USER_ID, WAITING_FOR_MANAGE_CREDITS, WAITING_FOR_EMAIL = range(7)
 
