@@ -30,13 +30,14 @@ ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 # Path to your remote Parquet dataset
 DATASET_URL_PHONE = "hf://datasets/WipeX00/scrappeddata/idx_phone.*.parquet"
 DATASET_URL_AADHAR = "hf://datasets/WipeX00/scrappeddata/idx_aadhar.*.parquet"
-DATASET_URL_INDDATA = "hf://datasets/WipeX00/Inddatainonefile/users_data.parquet"
-DATASET_URL_TIRUCALLER = "hf://datasets/WipeX00/tirucaller/idx_email.parquet"
+DATASET_URL_INDDATA = "https://huggingface.co/datasets/WipeX00/Inddatainonefile/resolve/main/users_data.parquet"
+DATASET_URL_TIRUCALLER = "https://huggingface.co/datasets/WipeX00/tirucaller/resolve/main/idx_email.parquet"
 
 # Initialize DuckDB and install httpfs extension for Hugging Face support
 con = duckdb.connect('bot.duckdb')
 con.execute("PRAGMA memory_limit='256MB';")
 con.execute("PRAGMA threads=2;")
+con.execute("PRAGMA enable_object_cache;")
 con.execute("INSTALL httpfs;")
 con.execute("LOAD httpfs;")
 
@@ -299,6 +300,7 @@ def search_by_email(email_str: str):
         for row2 in res_2:
             number, name2, address2, email2, gender, carrier = row2
             if number:
+                # Query INDDATA
                 query_1 = f"""
                     SELECT mobile, name, fname, address, alt, circle, id, email
                     FROM read_parquet('{DATASET_URL_INDDATA}')
@@ -306,15 +308,29 @@ def search_by_email(email_str: str):
                     LIMIT 1
                 """
                 res_1 = con.execute(query_1, [number]).fetchall()
+                
+                # Query Primary Phone Dataset for alternate numbers
+                query_phone = f"""
+                    SELECT otherNumber, fathersName, aadharNumber, address, town, district, state, pincode
+                    FROM read_parquet('{DATASET_URL_PHONE}') 
+                    WHERE phoneNumber = ? 
+                    LIMIT 1
+                """
+                res_phone = con.execute(query_phone, [number]).fetchall()
+                
+                alt_phone_primary = res_phone[0][0] if res_phone else None
+                fathers_primary = res_phone[0][1] if res_phone else None
+                aadhar_primary = res_phone[0][2] if res_phone else None
+                
                 if res_1:
                     mobile, name1, fname, address1, alt, circle, doc_id, email1 = res_1[0]
                     merged_dict = {
                         'name': name1 or name2,
-                        'fname': fname,
+                        'fname': fname or fathers_primary,
                         'phone': number,
-                        'alt_phone': alt,
+                        'alt_phone': alt or alt_phone_primary,
                         'email': email2 or email1,
-                        'doc_id': doc_id,
+                        'doc_id': doc_id or aadhar_primary,
                         'gender': gender,
                         'carrier': carrier,
                         'address': address1 if address1 and str(address1).lower() != 'none' else address2,
@@ -324,11 +340,11 @@ def search_by_email(email_str: str):
                 else:
                     merged_dict = {
                         'name': name2,
-                        'fname': None,
+                        'fname': fathers_primary,
                         'phone': number,
-                        'alt_phone': None,
+                        'alt_phone': alt_phone_primary,
                         'email': email2,
-                        'doc_id': None,
+                        'doc_id': aadhar_primary,
                         'gender': gender,
                         'carrier': carrier,
                         'address': address2,
