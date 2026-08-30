@@ -29,6 +29,8 @@ ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 # Path to your remote Parquet dataset
 DATASET_URL_PHONE = "hf://datasets/WipeX00/scrappeddata/idx_phone.*.parquet"
 DATASET_URL_AADHAR = "hf://datasets/WipeX00/scrappeddata/idx_aadhar.*.parquet"
+DATASET_URL_INDDATA = "hf://datasets/WipeX00/Inddatainonefile/users_data.parquet"
+DATASET_URL_TIRUCALLER = "hf://datasets/WipeX00/tirucaller/idx_email.parquet"
 
 # Initialize DuckDB and install httpfs extension for Hugging Face support
 con = duckdb.connect('bot.duckdb')
@@ -38,7 +40,7 @@ con.execute("INSTALL httpfs;")
 con.execute("LOAD httpfs;")
 
 # States for the conversation
-CHOOSING, WAITING_FOR_PHONE, WAITING_FOR_DOC, WAITING_FOR_VOUCHER, WAITING_FOR_MANAGE_USER_ID, WAITING_FOR_MANAGE_CREDITS = range(6)
+CHOOSING, WAITING_FOR_PHONE, WAITING_FOR_DOC, WAITING_FOR_VOUCHER, WAITING_FOR_MANAGE_USER_ID, WAITING_FOR_MANAGE_CREDITS, WAITING_FOR_EMAIL = range(7)
 
 # ================= Database & Credit System =================
 
@@ -241,10 +243,120 @@ def search_by_phone(phone_number: str):
             WHERE phoneNumber = ? 
             LIMIT 10
         """
-        return con.execute(query, [phone_number]).fetchall()
+        results = con.execute(query, [phone_number]).fetchall()
+        
+        # Fallback to new datasets if no results in the main dataset
+        if not results:
+            fallback_query_1 = f"""
+                SELECT mobile, name, fname, address, alt, circle, id, email
+                FROM read_parquet('{DATASET_URL_INDDATA}')
+                WHERE mobile = ?
+                LIMIT 10
+            """
+            fallback_1 = con.execute(fallback_query_1, [phone_number]).fetchall()
+            
+            fallback_query_2 = f"""
+                SELECT Number, Name, Address, Email, Gender, Carrier
+                FROM read_parquet('{DATASET_URL_TIRUCALLER}')
+                WHERE Number = ?
+                LIMIT 10
+            """
+            fallback_2 = con.execute(fallback_query_2, [phone_number]).fetchall()
+            
+            return {"primary": [], "fallback_1": fallback_1, "fallback_2": fallback_2}
+            
+        return {"primary": results, "fallback_1": [], "fallback_2": []}
     except Exception as e:
         logging.error(f"Search error: {e}")
         return None
+
+def search_by_email(email_str: str):
+    try:
+        query_1 = f"""
+            SELECT mobile, name, fname, address, alt, circle, id, email
+            FROM read_parquet('{DATASET_URL_INDDATA}')
+            WHERE email ILIKE ?
+            LIMIT 10
+        """
+        res_1 = con.execute(query_1, [email_str]).fetchall()
+        
+        query_2 = f"""
+            SELECT Number, Name, Address, Email, Gender, Carrier
+            FROM read_parquet('{DATASET_URL_TIRUCALLER}')
+            WHERE Email ILIKE ?
+            LIMIT 10
+        """
+        res_2 = con.execute(query_2, [email_str]).fetchall()
+        
+        return {"fallback_1": res_1, "fallback_2": res_2}
+    except Exception as e:
+        logging.error(f"Search error: {e}")
+        return None
+
+def format_combined_results(data_dict):
+    primary = data_dict.get("primary", [])
+    fallback_1 = data_dict.get("fallback_1", [])
+    fallback_2 = data_dict.get("fallback_2", [])
+    
+    total = len(primary) + len(fallback_1) + len(fallback_2)
+    if total == 0:
+        return None
+        
+    response_lines = [f"Found {total} record(s):"]
+    i = 1
+    
+    for row in primary:
+        name, fathers_name, doc_id, phone, other_phone, address, town, district, state, pincode = row
+        addr_parts = [p for p in [address, town, district, state, pincode] if p and str(p).lower() != 'none']
+        full_address = ", ".join(str(p) for p in addr_parts) if addr_parts else "N/A"
+        
+        record = (
+            f"\n--- Record {i} (Source: Primary) ---\n"
+            f"👤 Name: {name or 'N/A'}\n"
+            f"👨 Father's Name: {fathers_name or 'N/A'}\n"
+            f"📱 Phone: {phone or 'N/A'}\n"
+            f"📞 Alt Phone: {other_phone or 'N/A'}\n"
+            f"🪪 Aadhar: {doc_id or 'N/A'}\n"
+            f"📍 Address: {full_address}\n"
+            f"🌍 Circle: {state or 'N/A'}"
+        )
+        response_lines.append(record)
+        i += 1
+        
+    for row in fallback_1:
+        mobile, name, fname, address, alt, circle, doc_id, email = row
+        record = (
+            f"\n--- Record {i} (Source: Alt 1) ---\n"
+            f"👤 Name: {name or 'N/A'}\n"
+            f"👨 Father's Name: {fname or 'N/A'}\n"
+            f"📱 Phone: {mobile or 'N/A'}\n"
+            f"📞 Alt Phone: {alt or 'N/A'}\n"
+            f"📧 Email: {email or 'N/A'}\n"
+            f"🪪 ID: {doc_id or 'N/A'}\n"
+            f"📍 Address: {address or 'N/A'}\n"
+            f"🌍 Circle: {circle or 'N/A'}"
+        )
+        response_lines.append(record)
+        i += 1
+        
+    for row in fallback_2:
+        number, name, address, email, gender, carrier = row
+        record = (
+            f"\n--- Record {i} (Source: Alt 2) ---\n"
+            f"👤 Name: {name or 'N/A'}\n"
+            f"📱 Phone: {number or 'N/A'}\n"
+            f"📧 Email: {email or 'N/A'}\n"
+            f"⚧ Gender: {gender or 'N/A'}\n"
+            f"📡 Carrier: {carrier or 'N/A'}\n"
+            f"📍 Address: {address or 'N/A'}"
+        )
+        response_lines.append(record)
+        i += 1
+
+    response = "\n".join(response_lines)
+    if len(response) > 4000:
+        response = response[:4000] + "\n... (results truncated)"
+    return response
 
 def search_by_doc_id(doc_id: str):
     try:
@@ -292,8 +404,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     keyboard = [
         [KeyboardButton("📱 Number Info"), KeyboardButton("🪪 Aadhar Info")],
-        [KeyboardButton("💰 Check Balance"), KeyboardButton("🎁 Daily Bonus")],
-        [KeyboardButton("🎟️ Redeem Voucher"), KeyboardButton("💳 Buy Credits")]
+        [KeyboardButton("📧 Email Search"), KeyboardButton("💰 Check Balance")],
+        [KeyboardButton("🎁 Daily Bonus"), KeyboardButton("🎟️ Redeem Voucher")],
+        [KeyboardButton("💳 Buy Credits")]
     ]
     
     if user_id == ADMIN_ID:
@@ -331,6 +444,16 @@ async def choice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return CHOOSING
         await update.message.reply_text("Please enter the Aadhar number you want to search (Costs 1 credit):", reply_markup=ReplyKeyboardRemove())
         return WAITING_FOR_DOC
+        
+    elif choice == "📧 Email Search":
+        if is_user_blocked(user_id):
+            await update.message.reply_text("🚫 You have been blocked from using this bot.")
+            return CHOOSING
+        if get_user_credits(user_id) <= 0:
+            await update.message.reply_text("❌ You have 0 credits. Please claim your Daily Bonus or Buy Credits to search.")
+            return CHOOSING
+        await update.message.reply_text("Please enter the Email address you want to search (Costs 1 credit):", reply_markup=ReplyKeyboardRemove())
+        return WAITING_FOR_EMAIL
         
     elif choice == "💰 Check Balance":
         credits = get_user_credits(user_id)
@@ -380,9 +503,9 @@ async def handle_phone_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     results = search_by_phone(phone_number)
     
-    if results:
+    if results and (results.get('primary') or results.get('fallback_1') or results.get('fallback_2')):
         deduct_credit(user_id)
-        await update.message.reply_text(format_results(results))
+        await update.message.reply_text(format_combined_results(results))
     else:
         await update.message.reply_text("No user found with that phone number. (No credits deducted)")
         
@@ -411,6 +534,32 @@ async def handle_doc_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(format_results(results))
     else:
         await update.message.reply_text("No user found with that Aadhar number. (No credits deducted)")
+        
+    await start(update, context)
+    return CHOOSING
+
+async def handle_email_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    if is_user_blocked(user_id):
+        await update.message.reply_text("🚫 You have been blocked from using this bot. Search cancelled.")
+        await start(update, context)
+        return CHOOSING
+        
+    if get_user_credits(user_id) <= 0:
+        await update.message.reply_text("❌ You have 0 credits. Search cancelled.")
+        await start(update, context)
+        return CHOOSING
+        
+    email_str = update.message.text.strip()
+    await update.message.reply_text("Searching user data, please wait...")
+    
+    results = search_by_email(email_str)
+    
+    if results and (results.get('fallback_1') or results.get('fallback_2')):
+        deduct_credit(user_id)
+        await update.message.reply_text(format_combined_results(results))
+    else:
+        await update.message.reply_text("No user found with that email address. (No credits deducted)")
         
     await start(update, context)
     return CHOOSING
@@ -575,7 +724,7 @@ if __name__ == '__main__':
     conv_handler = ConversationHandler(
         entry_points=[
             CommandHandler("start", start),
-            MessageHandler(filters.Regex('^(📱 Number Info|🪪 Aadhar Info|💰 Check Balance|🎁 Daily Bonus|🎟️ Redeem Voucher|💳 Buy Credits|🛠️ Manage Users)$'), choice_handler),
+            MessageHandler(filters.Regex('^(📱 Number Info|🪪 Aadhar Info|📧 Email Search|💰 Check Balance|🎁 Daily Bonus|🎟️ Redeem Voucher|💳 Buy Credits|🛠️ Manage Users)$'), choice_handler),
             CallbackQueryHandler(manage_callback, pattern="^manage_")
         ],
         states={
@@ -585,6 +734,7 @@ if __name__ == '__main__':
             ],
             WAITING_FOR_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_phone_input)],
             WAITING_FOR_DOC: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_doc_input)],
+            WAITING_FOR_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_email_input)],
             WAITING_FOR_VOUCHER: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_voucher_input)],
             WAITING_FOR_MANAGE_USER_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_manage_user_id)],
             WAITING_FOR_MANAGE_CREDITS: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_manage_credits)],
