@@ -267,6 +267,16 @@ def search_by_phone(phone_number: str):
         """
         results = con.execute(query, [phone_number]).fetchall()
         
+        if not results:
+            fallback_query_1 = f"""
+                SELECT mobile, name, fname, address, alt, circle, id, email
+                FROM read_parquet('{DATASET_URL_INDDATA}')
+                WHERE mobile = ?
+                LIMIT 10
+            """
+            fallback_1 = con.execute(fallback_query_1, [phone_number]).fetchall()
+            return {"primary": [], "fallback_1": fallback_1, "fallback_2": []}
+            
         return {"primary": results, "fallback_1": [], "fallback_2": []}
     except Exception as e:
         logging.error(f"Search error: {e}")
@@ -282,19 +292,65 @@ def search_by_email(email_str: str):
         """
         res_2 = con.execute(query_2, [email_str]).fetchall()
         
-        if res_2:
-            return {"fallback_1": [], "fallback_2": res_2}
+        if not res_2:
+            return {"fallback_1": [], "fallback_2": []}
             
-        # If not found in TIRUCALLER, try INDDATA (Warning: Full scan of 88GB)
-        query_1 = f"""
-            SELECT mobile, name, fname, address, alt, circle, id, email
-            FROM read_parquet('{DATASET_URL_INDDATA}')
-            WHERE email = ?
-            LIMIT 10
-        """
-        res_1 = con.execute(query_1, [email_str]).fetchall()
-        
-        return {"fallback_1": res_1, "fallback_2": res_2}
+        merged_results = []
+        for row2 in res_2:
+            number, name2, address2, email2, gender, carrier = row2
+            if number:
+                query_1 = f"""
+                    SELECT mobile, name, fname, address, alt, circle, id, email
+                    FROM read_parquet('{DATASET_URL_INDDATA}')
+                    WHERE mobile = ?
+                    LIMIT 1
+                """
+                res_1 = con.execute(query_1, [number]).fetchall()
+                if res_1:
+                    mobile, name1, fname, address1, alt, circle, doc_id, email1 = res_1[0]
+                    merged_dict = {
+                        'name': name1 or name2,
+                        'fname': fname,
+                        'phone': number,
+                        'alt_phone': alt,
+                        'email': email2 or email1,
+                        'doc_id': doc_id,
+                        'gender': gender,
+                        'carrier': carrier,
+                        'address': address1 if address1 and str(address1).lower() != 'none' else address2,
+                        'circle': circle
+                    }
+                    merged_results.append(merged_dict)
+                else:
+                    merged_dict = {
+                        'name': name2,
+                        'fname': None,
+                        'phone': number,
+                        'alt_phone': None,
+                        'email': email2,
+                        'doc_id': None,
+                        'gender': gender,
+                        'carrier': carrier,
+                        'address': address2,
+                        'circle': None
+                    }
+                    merged_results.append(merged_dict)
+            else:
+                merged_dict = {
+                    'name': name2,
+                    'fname': None,
+                    'phone': None,
+                    'alt_phone': None,
+                    'email': email2,
+                    'doc_id': None,
+                    'gender': gender,
+                    'carrier': carrier,
+                    'address': address2,
+                    'circle': None
+                }
+                merged_results.append(merged_dict)
+                
+        return {"merged": merged_results}
     except Exception as e:
         logging.error(f"Search error: {e}")
         return None
@@ -303,8 +359,9 @@ def format_combined_results(data_dict):
     primary = data_dict.get("primary", [])
     fallback_1 = data_dict.get("fallback_1", [])
     fallback_2 = data_dict.get("fallback_2", [])
+    merged = data_dict.get("merged", [])
     
-    total = len(primary) + len(fallback_1) + len(fallback_2)
+    total = len(primary) + len(fallback_1) + len(fallback_2) + len(merged)
     if total == 0:
         return None
         
@@ -355,6 +412,23 @@ def format_combined_results(data_dict):
             f"⚧ Gender: {gender or 'N/A'}\n"
             f"📡 Carrier: {carrier or 'N/A'}\n"
             f"📍 Address: {address or 'N/A'}"
+        )
+        response_lines.append(record)
+        i += 1
+        
+    for row in merged:
+        record = (
+            f"\n--- Record {i} (Source: Merged Profile) ---\n"
+            f"👤 Name: {row.get('name') or 'N/A'}\n"
+            f"👨 Father's Name: {row.get('fname') or 'N/A'}\n"
+            f"📱 Phone: {row.get('phone') or 'N/A'}\n"
+            f"📞 Alt Phone: {row.get('alt_phone') or 'N/A'}\n"
+            f"📧 Email: {row.get('email') or 'N/A'}\n"
+            f"🪪 ID: {row.get('doc_id') or 'N/A'}\n"
+            f"⚧ Gender: {row.get('gender') or 'N/A'}\n"
+            f"📡 Carrier: {row.get('carrier') or 'N/A'}\n"
+            f"📍 Address: {row.get('address') or 'N/A'}\n"
+            f"🌍 Circle: {row.get('circle') or 'N/A'}"
         )
         response_lines.append(record)
         i += 1
