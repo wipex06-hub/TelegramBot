@@ -1,6 +1,7 @@
 import logging
 import duckdb
 import os
+import asyncio
 import random
 import string
 import psycopg2
@@ -280,7 +281,7 @@ def search_by_email(email_str: str):
         query_1 = f"""
             SELECT mobile, name, fname, address, alt, circle, id, email
             FROM read_parquet('{DATASET_URL_INDDATA}')
-            WHERE email ILIKE ?
+            WHERE email = ?
             LIMIT 10
         """
         res_1 = con.execute(query_1, [email_str]).fetchall()
@@ -288,7 +289,7 @@ def search_by_email(email_str: str):
         query_2 = f"""
             SELECT Number, Name, Address, Email, Gender, Carrier
             FROM read_parquet('{DATASET_URL_TIRUCALLER}')
-            WHERE Email ILIKE ?
+            WHERE Email = ?
             LIMIT 10
         """
         res_2 = con.execute(query_2, [email_str]).fetchall()
@@ -506,7 +507,7 @@ async def handle_phone_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
     phone_number = update.message.text.strip()
     await update.message.reply_text("Searching user data, please wait...")
     
-    results = search_by_phone(phone_number)
+    results = await asyncio.to_thread(search_by_phone, phone_number)
     
     if results and (results.get('primary') or results.get('fallback_1') or results.get('fallback_2')):
         deduct_credit(user_id)
@@ -532,7 +533,7 @@ async def handle_doc_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     doc_id = update.message.text.strip()
     await update.message.reply_text("Searching user data, please wait...")
     
-    results = search_by_doc_id(doc_id)
+    results = await asyncio.to_thread(search_by_doc_id, doc_id)
     
     if results:
         deduct_credit(user_id)
@@ -558,7 +559,7 @@ async def handle_email_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
     email_str = update.message.text.strip()
     await update.message.reply_text("Searching user data, please wait...")
     
-    results = search_by_email(email_str)
+    results = await asyncio.to_thread(search_by_email, email_str)
     
     if results and (results.get('fallback_1') or results.get('fallback_2')):
         deduct_credit(user_id)
