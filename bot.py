@@ -40,6 +40,11 @@ con.execute("PRAGMA threads=2;")
 con.execute("INSTALL httpfs;")
 con.execute("LOAD httpfs;")
 
+# Configure HTTP retries to gracefully handle Hugging Face 429 rate limits
+con.execute("SET http_retries=10;")
+con.execute("SET http_retry_wait_ms=1000;")
+con.execute("SET http_retry_backoff=2;")
+
 # Setup Hugging Face Authentication if token is provided
 hf_token = os.environ.get("HF_TOKEN")
 if hf_token:
@@ -47,6 +52,17 @@ if hf_token:
 
 # States for the conversation
 CHOOSING, WAITING_FOR_PHONE, WAITING_FOR_DOC, WAITING_FOR_VOUCHER, WAITING_FOR_MANAGE_USER_ID, WAITING_FOR_MANAGE_CREDITS, WAITING_FOR_EMAIL = range(7)
+
+SEARCH_MESSAGES = [
+    "🔍 Initializing neural network scan...",
+    "💻 Bypassing mainframe firewalls...",
+    "📡 Intercepting encrypted packets...",
+    "🛡️ Accessing restricted databases...",
+    "⚙️ Decrypting remote payloads...",
+    "🛰️ Triangulating signal origin...",
+    "🔐 Extracting secure hashes...",
+    "🕵️ Scanning dark web repositories..."
+]
 
 # ================= Database & Credit System =================
 
@@ -505,7 +521,7 @@ async def handle_phone_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return CHOOSING
         
     phone_number = update.message.text.strip()
-    await update.message.reply_text("Searching user data, please wait...")
+    await update.message.reply_text(random.choice(SEARCH_MESSAGES))
     
     results = await asyncio.to_thread(search_by_phone, phone_number)
     
@@ -531,7 +547,7 @@ async def handle_doc_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return CHOOSING
         
     doc_id = update.message.text.strip()
-    await update.message.reply_text("Searching user data, please wait...")
+    await update.message.reply_text(random.choice(SEARCH_MESSAGES))
     
     results = await asyncio.to_thread(search_by_doc_id, doc_id)
     
@@ -557,7 +573,7 @@ async def handle_email_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return CHOOSING
         
     email_str = update.message.text.strip()
-    await update.message.reply_text("Searching user data, please wait...")
+    await update.message.reply_text(random.choice(SEARCH_MESSAGES))
     
     results = await asyncio.to_thread(search_by_email, email_str)
     
