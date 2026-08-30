@@ -267,26 +267,6 @@ def search_by_phone(phone_number: str):
         """
         results = con.execute(query, [phone_number]).fetchall()
         
-        # Fallback to new datasets if no results in the main dataset
-        if not results:
-            fallback_query_1 = f"""
-                SELECT mobile, name, fname, address, alt, circle, id, email
-                FROM read_parquet('{DATASET_URL_INDDATA}')
-                WHERE mobile = ?
-                LIMIT 10
-            """
-            fallback_1 = con.execute(fallback_query_1, [phone_number]).fetchall()
-            
-            fallback_query_2 = f"""
-                SELECT Number, Name, Address, Email, Gender, Carrier
-                FROM read_parquet('{DATASET_URL_TIRUCALLER}')
-                WHERE Number = ?
-                LIMIT 10
-            """
-            fallback_2 = con.execute(fallback_query_2, [phone_number]).fetchall()
-            
-            return {"primary": [], "fallback_1": fallback_1, "fallback_2": fallback_2}
-            
         return {"primary": results, "fallback_1": [], "fallback_2": []}
     except Exception as e:
         logging.error(f"Search error: {e}")
