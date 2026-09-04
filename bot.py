@@ -118,6 +118,12 @@ def init_db():
         conn.commit()
     except DuplicateColumn:
         conn.rollback()
+        
+    try:
+        c.execute('ALTER TABLE users ADD COLUMN username TEXT')
+        conn.commit()
+    except DuplicateColumn:
+        conn.rollback()
 
     c.execute('''
         CREATE TABLE IF NOT EXISTS vouchers (
@@ -136,7 +142,7 @@ def _check_and_expire_bonus(user_id):
     # Reset bonus_credits to 0 if the current time is past the expiry time
     c.execute('''
         UPDATE users 
-        SET bonus_credits = 0 
+        SET bonus_credits = 0, bonus_expiry = NULL
         WHERE user_id = %s 
         AND bonus_expiry IS NOT NULL 
         AND NOW() > bonus_expiry
@@ -144,24 +150,31 @@ def _check_and_expire_bonus(user_id):
     conn.commit()
     conn.close()
 
-def get_user_data(user_id):
+def get_user_data(user_id, username=None):
     # First, expire any old bonuses
     _check_and_expire_bonus(user_id)
     
     conn = get_db_connection()
     c = conn.cursor()
-    c.execute('SELECT credits, bonus_credits, is_blocked FROM users WHERE user_id = %s', (user_id,))
+    
+    # Try fetching first to check if we need to update the username
+    c.execute('SELECT credits, bonus_credits, is_blocked, username FROM users WHERE user_id = %s', (user_id,))
     row = c.fetchone()
     
     if row:
+        current_username = row[3]
+        if username and current_username != username:
+            c.execute('UPDATE users SET username = %s WHERE user_id = %s', (username, user_id))
+            conn.commit()
+            current_username = username
         conn.close()
-        return {"credits": row[0], "bonus_credits": row[1], "is_blocked": bool(row[2])}
+        return {"credits": row[0], "bonus_credits": row[1], "is_blocked": bool(row[2]), "username": current_username}
     else:
         # Create user with 0 credits if they don't exist
-        c.execute('INSERT INTO users (user_id, credits, bonus_credits, is_blocked) VALUES (%s, 0, 0, FALSE)', (user_id,))
+        c.execute('INSERT INTO users (user_id, credits, bonus_credits, is_blocked, username) VALUES (%s, 0, 0, FALSE, %s)', (user_id, username))
         conn.commit()
         conn.close()
-        return {"credits": 0, "bonus_credits": 0, "is_blocked": False}
+        return {"credits": 0, "bonus_credits": 0, "is_blocked": False, "username": username}
 
 def get_user_credits(user_id):
     data = get_user_data(user_id)
@@ -170,7 +183,7 @@ def get_user_credits(user_id):
 def get_all_users():
     conn = get_db_connection()
     c = conn.cursor()
-    c.execute('SELECT user_id, credits, bonus_credits, is_blocked FROM users')
+    c.execute('SELECT user_id, credits, bonus_credits, is_blocked, username FROM users')
     rows = c.fetchall()
     conn.close()
     return rows
@@ -211,6 +224,29 @@ def add_credits(user_id, amount):
     c.execute('UPDATE users SET credits = credits + %s WHERE user_id = %s', (amount, user_id))
     conn.commit()
     conn.close()
+
+def check_and_add_referral(new_user_id, inviter_id):
+    if new_user_id == inviter_id:
+        return False
+        
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('SELECT 1 FROM users WHERE user_id = %s', (new_user_id,))
+    row = c.fetchone()
+    
+    if not row:
+        # User is new! Ensure inviter exists
+        c.execute('SELECT 1 FROM users WHERE user_id = %s', (inviter_id,))
+        if not c.fetchone():
+            c.execute('INSERT INTO users (user_id, credits, bonus_credits, is_blocked) VALUES (%s, 0, 0, FALSE)', (inviter_id,))
+            
+        c.execute('UPDATE users SET credits = credits + 2 WHERE user_id = %s', (inviter_id,))
+        conn.commit()
+        conn.close()
+        return True
+        
+    conn.close()
+    return False
 
 def claim_daily_bonus(user_id):
     _check_and_expire_bonus(user_id)
@@ -501,11 +537,30 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Send message on `/start` with reply keyboard buttons."""
     user_id = update.effective_user.id
     
+    if context.args:
+        try:
+            inviter_id = int(context.args[0])
+            is_new = await asyncio.to_thread(check_and_add_referral, user_id, inviter_id)
+            if is_new:
+                try:
+                    await context.bot.send_message(
+                        chat_id=inviter_id,
+                        text="🎉 Someone joined using your referral link! You earned 2 permanent credits."
+                    )
+                except Exception:
+                    pass
+        except ValueError:
+            pass
+            
+    # Ensure user data is created if new
+    username = update.effective_user.username
+    get_user_data(user_id, username)
+    
     keyboard = [
         [KeyboardButton("📱 Number Info"), KeyboardButton("🪪 Aadhar Info")],
         [KeyboardButton("📧 Email Search"), KeyboardButton("💰 Check Balance")],
         [KeyboardButton("🎁 Daily Bonus"), KeyboardButton("🎟️ Redeem Voucher")],
-        [KeyboardButton("💳 Buy Credits")]
+        [KeyboardButton("💳 Buy Credits"), KeyboardButton("🔗 Refer & Earn")]
     ]
     
     if user_id == ADMIN_ID:
@@ -571,6 +626,17 @@ async def choice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🛒 To buy permanent credits, please contact the admin on Telegram: @WIPE_X")
         return CHOOSING
         
+    elif choice == "🔗 Refer & Earn":
+        bot_username = (await context.bot.get_me()).username
+        ref_link = f"https://t.me/{bot_username}?start={user_id}"
+        msg = (
+            f"🔗 *Refer & Earn*\n\n"
+            f"Share this link with your friends. If they join using your link, you will get *2 permanent credits* for each new user!\n\n"
+            f"Your referral link:\n`{ref_link}`"
+        )
+        await update.message.reply_text(msg, parse_mode="Markdown")
+        return CHOOSING
+        
     elif choice == "🎟️ Redeem Voucher":
         await update.message.reply_text("Please enter your voucher code:", reply_markup=ReplyKeyboardRemove())
         return WAITING_FOR_VOUCHER
@@ -584,9 +650,10 @@ async def choice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not all_users:
             user_list_str += "No users found.\n"
         else:
-            for uid, creds, bonus, blocked in all_users:
+            for uid, creds, bonus, blocked, uname in all_users:
                 status = "🚫 Blocked" if blocked else "✅ Active"
-                user_list_str += f"- `{uid}` (Credits: {creds}, Bonus: {bonus}) [{status}]\n"
+                uname_display = f"@{uname}" if uname else "No Username"
+                user_list_str += f"- `{uid}` ({uname_display}) (Credits: {creds}, Bonus: {bonus}) [{status}]\n"
                 
         if len(user_list_str) > 3900:
             user_list_str = user_list_str[:3900] + "\n... (list truncated)"
@@ -756,9 +823,11 @@ async def handle_manage_user_id(update: Update, context: ContextTypes.DEFAULT_TY
     bonus_credits = user_data['bonus_credits']
     total_credits = perm_credits + bonus_credits
     is_blocked = user_data['is_blocked']
+    uname = user_data.get('username')
+    uname_display = f"@{uname}" if uname else "No Username"
     status_text = "🚫 Blocked" if is_blocked else "✅ Active"
     
-    text = f"👤 **User ID:** `{target_id}`\n💰 **Total Credits:** {total_credits} _(Perm: {perm_credits}, Bonus: {bonus_credits})_\n🛡️ **Status:** {status_text}"
+    text = f"👤 **User ID:** `{target_id}` ({uname_display})\n💰 **Total Credits:** {total_credits} _(Perm: {perm_credits}, Bonus: {bonus_credits})_\n🛡️ **Status:** {status_text}"
     
     block_button = InlineKeyboardButton("✅ Unblock User", callback_data=f"manage_unblock_{target_id}") if is_blocked else InlineKeyboardButton("🚫 Block User", callback_data=f"manage_block_{target_id}")
     
@@ -870,7 +939,7 @@ if __name__ == '__main__':
     conv_handler = ConversationHandler(
         entry_points=[
             CommandHandler("start", start),
-            MessageHandler(filters.Regex('^(📱 Number Info|🪪 Aadhar Info|📧 Email Search|💰 Check Balance|🎁 Daily Bonus|🎟️ Redeem Voucher|💳 Buy Credits|🛠️ Manage Users)$'), choice_handler),
+            MessageHandler(filters.Regex('^(📱 Number Info|🪪 Aadhar Info|📧 Email Search|💰 Check Balance|🎁 Daily Bonus|🎟️ Redeem Voucher|💳 Buy Credits|🔗 Refer & Earn|🛠️ Manage Users)$'), choice_handler),
             CallbackQueryHandler(manage_callback, pattern="^manage_")
         ],
         states={
