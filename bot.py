@@ -800,7 +800,12 @@ async def handle_voucher_input(update: Update, context: ContextTypes.DEFAULT_TYP
     
     # If redemption was successful, notify the admin
     if result_msg.startswith("✅"):
-        username = f"@{user.username}" if user.username else "No Username"
+        if user.username:
+            safe_uname = user.username.replace('_', '\\_').replace('*', '\\*').replace('`', '\\`')
+            username_display = f"@{safe_uname}"
+        else:
+            username_display = "No Username"
+            
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
         try:
@@ -808,7 +813,7 @@ async def handle_voucher_input(update: Update, context: ContextTypes.DEFAULT_TYP
                 chat_id=ADMIN_ID,
                 text=(
                     f"🔔 *Voucher Redeemed!*\n\n"
-                    f"👤 *User:* {username}\n"
+                    f"👤 *User:* {username_display}\n"
                     f"🆔 *User ID:* `{user.id}`\n"
                     f"🎟️ *Code:* `{code}`\n"
                     f"⏰ *Time:* {current_time}"
