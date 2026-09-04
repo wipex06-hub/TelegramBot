@@ -578,6 +578,10 @@ async def choice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Parses the user's choice from the reply keyboard."""
     choice = update.message.text
     user_id = update.message.from_user.id
+    username = update.message.from_user.username
+    
+    # Silently capture and update username on any interaction
+    get_user_data(user_id, username)
     
     if choice == "📱 Number Info":
         if is_user_blocked(user_id):
@@ -696,7 +700,7 @@ async def handle_phone_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
     phone_number = update.message.text.strip()
     
-    if phone_number.startswith('+91') or (phone_number.startswith('91') and len(phone_number) > 10):
+    if len(phone_number) != 10 or not phone_number.isdigit():
         await update.message.reply_text("⚠️ Please enter the number in the right 10-digit format (without +91 or 91).")
         await start(update, context)
         return CHOOSING
