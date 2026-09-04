@@ -652,7 +652,11 @@ async def choice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             for uid, creds, bonus, blocked, uname in all_users:
                 status = "🚫 Blocked" if blocked else "✅ Active"
-                uname_display = f"@{uname}" if uname else "No Username"
+                if uname:
+                    safe_uname = uname.replace('_', '\\_').replace('*', '\\*').replace('`', '\\`')
+                    uname_display = f"@{safe_uname}"
+                else:
+                    uname_display = "No Username"
                 user_list_str += f"- `{uid}` ({uname_display}) (Credits: {creds}, Bonus: {bonus}) [{status}]\n"
                 
         if len(user_list_str) > 3900:
@@ -830,7 +834,11 @@ async def handle_manage_user_id(update: Update, context: ContextTypes.DEFAULT_TY
     total_credits = perm_credits + bonus_credits
     is_blocked = user_data['is_blocked']
     uname = user_data.get('username')
-    uname_display = f"@{uname}" if uname else "No Username"
+    if uname:
+        safe_uname = uname.replace('_', '\\_').replace('*', '\\*').replace('`', '\\`')
+        uname_display = f"@{safe_uname}"
+    else:
+        uname_display = "No Username"
     status_text = "🚫 Blocked" if is_blocked else "✅ Active"
     
     text = f"👤 **User ID:** `{target_id}` ({uname_display})\n💰 **Total Credits:** {total_credits} _(Perm: {perm_credits}, Bonus: {bonus_credits})_\n🛡️ **Status:** {status_text}"
