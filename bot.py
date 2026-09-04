@@ -691,6 +691,12 @@ async def handle_phone_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return CHOOSING
         
     phone_number = update.message.text.strip()
+    
+    if phone_number.startswith('+91') or (phone_number.startswith('91') and len(phone_number) > 10):
+        await update.message.reply_text("⚠️ Please enter the number in the right 10-digit format (without +91 or 91).")
+        await start(update, context)
+        return CHOOSING
+        
     msg = await update.message.reply_text(random.choice(SEARCH_MESSAGES))
     animation_task = asyncio.create_task(loading_animation(context, update.message.chat_id, msg.message_id))
     
